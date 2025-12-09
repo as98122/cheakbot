@@ -18,16 +18,18 @@ const path = require('path');
 // 1. 환경 설정
 // ----------------------
 
-// TODO: 여기에 네 봇 토큰 넣기 (환경변수로 대체됨)
+// TOKEN은 Koyeb 환경변수에 설정
 const TOKEN = process.env.TOKEN;
 
-// TODO: 자동 출석 메시지를 보낼 채널 ID 넣기
-// 디스코드 설정 > 고급 > 개발자 모드 ON 후 채널 우클릭 > ID 복사
+// 자동 출석 메시지를 보낼 채널 ID
 const ATTEND_CHANNEL_ID = '1447608509209510010';
 
 // DB 파일 경로
 const dbPath = path.join(__dirname, 'attendance.db');
 const db = new sqlite3.Database(dbPath);
+
+// Ephemeral 플래그 (Discord message flags: 1 << 6)
+const EPHEMERAL_FLAG = 1 << 6;
 
 // ======================================================================
 // 2. DB 테이블 생성
@@ -71,7 +73,7 @@ function getYesterdayString() {
   const yester = new Date(k.getTime() - 24 * 60 * 60 * 1000);
   const y = yester.getUTCFullYear();
   const m = String(yester.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(yester.getUTCDate()).padStart(2, '0');
+  const d = String(yester.getUTCDate() + 0).padStart(2, '0');
   return `${y}-${m}-${d}`;
 }
 
@@ -276,104 +278,137 @@ client.on('interactionCreate', async interaction => {
   if (interaction.isChatInputCommand()) {
     const { commandName } = interaction;
 
-    // /출석메시지
+    // /출석메시지 (에페메랄, defer 후 editReply)
     if (commandName === '출석메시지') {
-      await sendAttendanceMessage(interaction.channel);
+      try {
+        await interaction.deferReply({ flags: EPHEMERAL_FLAG });
 
-      const embed = new EmbedBuilder()
-        .setTitle('🌟 출석 메시지 생성 완료')
-        .setDescription('이 채널에 새로운 출석 메시지를 생성했습니다!')
-        .setColor(0x2ecc71);
+        await sendAttendanceMessage(interaction.channel);
 
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+        const embed = new EmbedBuilder()
+          .setTitle('🌟 출석 메시지 생성 완료')
+          .setDescription('이 채널에 새로운 출석 메시지를 생성했습니다!')
+          .setColor(0x2ecc71);
+
+        return interaction.editReply({ embeds: [embed] }).catch(console.error);
+      } catch (e) {
+        console.error(e);
+        return;
+      }
     }
 
-    // /출석랭킹
+    // /출석랭킹 (공개, defer 후 editReply)
     if (commandName === '출석랭킹') {
       const monthPrefix = today.slice(0, 7); // YYYY-MM
 
-      db.all(
-        `
-        SELECT user_id, COUNT(*) AS cnt
-        FROM attendance
-        WHERE date LIKE ?
-        GROUP BY user_id
-        ORDER BY cnt DESC
-        LIMIT 10
-        `,
-        [`${monthPrefix}%`],
-        async (err, rows) => {
-          if (err) {
-            console.error(err);
+      try {
+        await interaction.deferReply(); // 공개 메시지
+
+        db.all(
+          `
+          SELECT user_id, COUNT(*) AS cnt
+          FROM attendance
+          WHERE date LIKE ?
+          GROUP BY user_id
+          ORDER BY cnt DESC
+          LIMIT 10
+          `,
+          [`${monthPrefix}%`],
+          (err, rows) => {
+            if (err) {
+              console.error(err);
+              const embed = new EmbedBuilder()
+                .setTitle('❌ 오류')
+                .setDescription('랭킹을 불러오는 중 오류가 발생했습니다.')
+                .setColor(0xe74c3c);
+              return interaction
+                .editReply({ embeds: [embed] })
+                .catch(console.error);
+            }
+
+            if (rows.length === 0) {
+              const embed = new EmbedBuilder()
+                .setTitle(`🏆 ${monthPrefix}월 출석 랭킹`)
+                .setDescription('이번 달 출석 기록이 없습니다.')
+                .setColor(0xe74c3c);
+              return interaction
+                .editReply({ embeds: [embed] })
+                .catch(console.error);
+            }
+
+            let desc = '';
+            rows.forEach((r, i) => {
+              desc += `${i + 1}위 — <@${r.user_id}> : **${r.cnt}회**\n`;
+            });
+
             const embed = new EmbedBuilder()
-              .setTitle('❌ 오류')
-              .setDescription('랭킹을 불러오는 중 오류가 발생했습니다.')
-              .setColor(0xe74c3c);
-            return interaction.reply({ embeds: [embed] });
+              .setTitle(`🏆 ${monthPrefix}월 출석 랭킹 TOP 10`)
+              .setDescription(desc)
+              .setColor(0xf1c40f);
+
+            return interaction
+              .editReply({ embeds: [embed] })
+              .catch(console.error);
           }
-
-          if (rows.length === 0) {
-            const embed = new EmbedBuilder()
-              .setTitle(`🏆 ${monthPrefix}월 출석 랭킹`)
-              .setDescription('이번 달 출석 기록이 없습니다.')
-              .setColor(0xe74c3c);
-            return interaction.reply({ embeds: [embed] });
-          }
-
-          let desc = '';
-          rows.forEach((r, i) => {
-            desc += `${i + 1}위 — <@${r.user_id}> : **${r.cnt}회**\n`;
-          });
-
-          const embed = new EmbedBuilder()
-            .setTitle(`🏆 ${monthPrefix}월 출석 랭킹 TOP 10`)
-            .setDescription(desc)
-            .setColor(0xf1c40f);
-
-          return interaction.reply({ embeds: [embed] });
-        }
-      );
+        );
+      } catch (e) {
+        console.error(e);
+      }
+      return;
     }
 
-    // /오늘출석
+    // /오늘출석 (공개, defer 후 editReply)
     if (commandName === '오늘출석') {
       const label = getTodayLabel();
 
-      db.all(
-        `
-        SELECT DISTINCT user_id
-        FROM attendance
-        WHERE date = ?
-        `,
-        [today],
-        async (err, rows) => {
-          if (err) {
-            console.error(err);
+      try {
+        await interaction.deferReply(); // 공개 메시지
+
+        db.all(
+          `
+          SELECT DISTINCT user_id
+          FROM attendance
+          WHERE date = ?
+          `,
+          [today],
+          (err, rows) => {
+            if (err) {
+              console.error(err);
+              const embed = new EmbedBuilder()
+                .setTitle('❌ 오류')
+                .setDescription('오늘 출석 목록을 불러오는 중 오류가 발생했습니다.')
+                .setColor(0xe74c3c);
+              return interaction
+                .editReply({ embeds: [embed] })
+                .catch(console.error);
+            }
+
+            if (rows.length === 0) {
+              const embed = new EmbedBuilder()
+                .setTitle(`📅 ${label} 출석`)
+                .setDescription('오늘은 아직 아무도 출석하지 않았어요 😢')
+                .setColor(0xe74c3c);
+              return interaction
+                .editReply({ embeds: [embed] })
+                .catch(console.error);
+            }
+
+            const list = rows.map(r => `• <@${r.user_id}>`).join('\n');
+
             const embed = new EmbedBuilder()
-              .setTitle('❌ 오류')
-              .setDescription('오늘 출석 목록을 불러오는 중 오류가 발생했습니다.')
-              .setColor(0xe74c3c);
-            return interaction.reply({ embeds: [embed] });
+              .setTitle(`📅 ${label} 출석 (${rows.length}명)`)
+              .setDescription(list)
+              .setColor(0x2ecc71);
+
+            return interaction
+              .editReply({ embeds: [embed] })
+              .catch(console.error);
           }
-
-          if (rows.length === 0) {
-            const embed = new EmbedBuilder()
-              .setTitle(`📅 ${label} 출석`)
-              .setDescription('오늘은 아직 아무도 출석하지 않았어요 😢')
-              .setColor(0xe74c3c);
-            return interaction.reply({ embeds: [embed] });
-          }
-
-          const list = rows.map(r => `• <@${r.user_id}>`).join('\n');
-
-          const embed = new EmbedBuilder()
-            .setTitle(`📅 ${label} 출석 (${rows.length}명)`)
-            .setDescription(list)
-            .setColor(0x2ecc71);
-
-          return interaction.reply({ embeds: [embed] });
-        }
-      );
+        );
+      } catch (e) {
+        console.error(e);
+      }
+      return;
     }
 
     return; // 슬래시 명령어 처리 끝
@@ -385,18 +420,28 @@ client.on('interactionCreate', async interaction => {
 
     const userId = interaction.user.id;
 
+    // 🔥 먼저 deferReply 해서 인터랙션 유효시간 연장 + 에페메랄 설정
+    try {
+      await interaction.deferReply({ flags: EPHEMERAL_FLAG });
+    } catch (e) {
+      console.error('deferReply 실패:', e);
+      return;
+    }
+
     // 오늘 이미 출석했는지 확인
     db.get(
       'SELECT * FROM attendance WHERE user_id = ? AND date = ?',
       [userId, today],
-      async (err, row) => {
+      (err, row) => {
         if (err) {
           console.error(err);
           const embed = new EmbedBuilder()
             .setTitle('❌ 오류 발생')
             .setDescription('출석 처리 중 문제가 발생했습니다.')
             .setColor(0xe74c3c);
-          return interaction.reply({ embeds: [embed], ephemeral: true });
+          return interaction
+            .editReply({ embeds: [embed] })
+            .catch(console.error);
         }
 
         // 이미 출석했을 때
@@ -404,10 +449,11 @@ client.on('interactionCreate', async interaction => {
           db.get(
             'SELECT COUNT(DISTINCT user_id) AS cnt FROM attendance WHERE date = ?',
             [today],
-            async (err2, countRow) => {
+            (err2, countRow) => {
+              if (err2) console.error(err2);
               const cnt = countRow?.cnt ?? 0;
 
-              await updateChannelTopicWithCount(interaction.channel, cnt); 
+              updateChannelTopicWithCount(interaction.channel, cnt);
 
               const embed = new EmbedBuilder()
                 .setTitle('🔔 이미 출석 완료!')
@@ -417,7 +463,9 @@ client.on('interactionCreate', async interaction => {
                 )
                 .setColor(0x3498db);
 
-              return interaction.reply({ embeds: [embed], ephemeral: true });
+              return interaction
+                .editReply({ embeds: [embed] })
+                .catch(console.error);
             }
           );
           return;
@@ -434,19 +482,22 @@ client.on('interactionCreate', async interaction => {
                 .setTitle('❌ 저장 오류')
                 .setDescription('출석 정보를 저장하는 중 문제가 발생했습니다.')
                 .setColor(0xe74c3c);
-              return interaction.reply({ embeds: [embed], ephemeral: true });
+              return interaction
+                .editReply({ embeds: [embed] })
+                .catch(console.error);
             }
 
             // 현재 인원 수 조회
             db.get(
               'SELECT COUNT(DISTINCT user_id) AS cnt FROM attendance WHERE date = ?',
               [today],
-              async (err3, countRow) => {
+              (err3, countRow) => {
+                if (err3) console.error(err3);
                 const cnt = countRow?.cnt ?? 1;
 
-                await updateChannelTopicWithCount(interaction.channel, cnt);
+                updateChannelTopicWithCount(interaction.channel, cnt);
 
-                updateStreak(userId, today, async streak => {
+                updateStreak(userId, today, streak => {
                   let streakMsg;
                   if (streak && streak > 1) {
                     streakMsg = `🔥 **${streak}일 연속 출석 중!**`;
@@ -461,7 +512,9 @@ client.on('interactionCreate', async interaction => {
                     )
                     .setColor(0x2ecc71);
 
-                  return interaction.reply({ embeds: [embed], ephemeral: true });
+                  return interaction
+                    .editReply({ embeds: [embed] })
+                    .catch(console.error);
                 });
               }
             );
